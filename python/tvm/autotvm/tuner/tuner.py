@@ -71,7 +71,7 @@ class Tuner(object):
         """
         pass
 
-    def tune(self, n_trial, measure_option, early_stopping=None, callbacks=()):
+    def tune(self, n_trial, measure_option, early_stopping=None, callbacks=(), constraints=()):
         """Begin tuning
 
         Parameters
@@ -106,6 +106,10 @@ class Tuner(object):
             configs = self.next_batch(min(n_parallel, n_trial - i))
 
             inputs = [MeasureInput(self.task.target, self.task, config) for config in configs]
+            
+            inputs_filtered = [input for input in inputs if all([f(input) for f in constraints])]
+            print("TVM filter: ", len(inputs), len(inputs_filtered))
+            inputs = inputs_filtered
             results = measure_batch(inputs)
 
             # keep best config
