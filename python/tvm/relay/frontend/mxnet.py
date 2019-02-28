@@ -172,6 +172,21 @@ def _mx_batch_norm(inputs, attrs):
     return _op.nn.batch_norm(*inputs, **new_attrs)
 
 
+def _mx_slice(inputs, attrs):
+    new_attrs = {}
+    begin = attrs.get_int_tuple('begin', None)
+    end = attrs.get_int_tuple('end', None)
+    stride = attrs.get_int_tuple('step', None)
+    if begin is None or end is None:
+        raise RuntimeError("begin and end are required parameters.")
+    if None in begin or None in end:
+        raise RuntimeError("None in begin or end is not supported yet.")
+    new_attrs = {'begin': begin, 'end': end}
+    if stride is not None:
+        new_attrs['strides'] = stride
+    return _op.strided_slice(inputs[0], **new_attrs)
+
+
 def _mx_split(inputs, attrs):
     axis = attrs.get_int("axis", 1)
     new_attrs = {}
@@ -268,6 +283,18 @@ def _mx_multibox_detection(inputs, attrs):
     return _op.vision.nms(ret[0], ret[1], **new_attrs1)
 
 
+def _mx_arange(inputs, attrs):
+    assert len(inputs) == 0
+    if attrs.get_int("repeat", 1) != 1:
+        raise RuntimeError("arange doesn't support repeat")
+    new_attrs = {}
+    new_attrs["start"] = attrs.get_float("start", 0)
+    new_attrs["stop"] = attrs.get_float("stop")
+    new_attrs["step"] = attrs.get_float("step", 1)
+    new_attrs["dtype"] = attrs.get_str("dtype", "float32")
+    return _op.arange(**new_attrs)
+
+
 def _mx_roi_align(inputs, attrs):
     new_attrs = {}
     new_attrs["pooled_size"] = attrs.get_int_tuple("pooled_size")
@@ -356,12 +383,14 @@ _convert_map = {
     "BatchNorm"     : _mx_batch_norm,
     "BatchNorm_v1"  : _mx_batch_norm,
     "LRN"           : _mx_lrn,
+    "slice"         : _mx_slice,
     "SliceChannel"  : _mx_split,
     "split"         : _mx_split,
     "expand_dims"   : _mx_expand_dims,
     "Concat"        : _mx_concat,
     "concat"        : _mx_concat,
     "LeakyReLU"     : _mx_leaky_relu,
+    "_arange"       : _mx_arange,
     "SoftmaxOutput" : _mx_softmax_output,
     "SoftmaxActivation" : _mx_softmax_activation,
     # vision
