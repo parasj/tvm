@@ -245,11 +245,11 @@ def _contrib_multibox_detection(inputs, attrs):
         if attrs.get('variances') is not None else (0.1, 0.1, 0.2, 0.2)
     nms_topk = attrs.get('nms_topk') or -1
     new_attrs0 = {'clip': clip, 'threshold': float(threshold), 'variances': variances}
-    new_attrs1 = {'nms_threshold': float(nms_threshold), 'force_suppress': force_suppress,
-                  'nms_topk': int(nms_topk)}
+    new_attrs1 = {'return_indices': False, 'iou_threshold': float(nms_threshold),
+                  'force_suppress': force_suppress, 'top_k': int(nms_topk)}
     data, valid_count = _get_nnvm_op('multibox_transform_loc')(inputs[0], inputs[1],
                                                                inputs[2], **new_attrs0)
-    return _get_nnvm_op('nms')(data, valid_count, **new_attrs1)
+    return _get_nnvm_op('non_max_suppression')(data, valid_count, **new_attrs1)
 
 def _elemwise_sum(inputs, _):
     new_attrs = {'num_args':len(inputs)}
@@ -285,6 +285,12 @@ def _lrn(inputs, attrs):
     new_attrs['axis'] = 1
     new_attrs['size'] = _required_attr(attrs, 'nsize')
     return _get_nnvm_op(op_name)(*inputs, **new_attrs)
+
+def _minimum(inputs, attrs):
+    return _get_nnvm_op('broadcast_min')(*inputs, **attrs)
+
+def _maximum(inputs, attrs):
+    return _get_nnvm_op('broadcast_max')(*inputs, **attrs)
 
 def _ones(_, attrs):
     op_name = 'ones'
@@ -330,6 +336,8 @@ _convert_map = {
     '_rminus_scalar': _rename('__rsub_scalar__'),
     '_contrib_MultiBoxPrior' : _rename('multibox_prior'),
     '_contrib_MultiBoxDetection' : _contrib_multibox_detection,
+    '_minimum'      : _minimum,
+    '_maximum'      : _maximum,
     '_ones'         : _ones,
     '_zeros'        : _zeros,
     'argmax'        : _argmax,

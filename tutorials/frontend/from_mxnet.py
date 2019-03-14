@@ -3,7 +3,8 @@
 
 Compile MXNet Models
 ====================
-**Author**: `Joshua Z. Zhang <https://zhreshold.github.io/>`_, `Eddie Yan <https://github.com/eqy>`_
+**Author**: `Joshua Z. Zhang <https://zhreshold.github.io/>`_, \
+            `Kazutaka Morita <https://github.com/kazum>`_
 
 This article is an introductory tutorial to deploy mxnet models with Relay.
 
@@ -20,8 +21,8 @@ https://mxnet.incubator.apache.org/versions/master/install/index.html
 """
 # some standard imports
 import mxnet as mx
-from tvm import relay
 import tvm
+import tvm.relay as relay
 import numpy as np
 
 ######################################################################
@@ -33,7 +34,6 @@ from mxnet.gluon.utils import download
 from PIL import Image
 from matplotlib import pyplot as plt
 block = get_model('resnet18_v1', pretrained=True)
-
 img_name = 'cat.png'
 synset_url = ''.join(['https://gist.githubusercontent.com/zhreshold/',
                       '4d0b62f3d01426887599d4f7ede23ee5/raw/',
@@ -64,23 +64,57 @@ print('x', x.shape)
 # Now we would like to port the Gluon model to a portable computational graph.
 # It's as easy as several lines.
 # We support MXNet static graph(symbol) and HybridBlock in mxnet.gluon
-input_shape = (1, 3, 224, 224)
-dtype = 'float32'
-net, params = relay.frontend.from_mxnet(block, shape={'data': input_shape}, dtype=dtype)
-# we want a probability so add a softmax operator
-net = relay.Function(net.params, relay.nn.softmax(net.body), None, net.type_params, net.attrs)
+shape_dict = {'data': x.shape}
+func, params = relay.frontend.from_mxnet(block, shape_dict)
+## we want a probability so add a softmax operator
+func = relay.Function(func.params, relay.nn.softmax(func.body), None, func.type_params, func.attrs)
 
 ######################################################################
 # now compile the graph
 target = 'cuda'
-shape_dict = {'data': x.shape}
 with relay.build_config(opt_level=3):
-    intrp = relay.build_module.create_executor('graph', net, tvm.gpu(0), target) 
+    graph, lib, params = relay.build(func, target, params=params)
 
 ######################################################################
 # Execute the portable graph on TVM
 # ---------------------------------
 # Now, we would like to reproduce the same forward computation using TVM.
-tvm_output = intrp.evaluate(net)(tvm.nd.array(x.astype(dtype)), **params)
+from tvm.contrib import graph_runtime
+ctx = tvm.gpu(0)
+dtype = 'float32'
+m = graph_runtime.create(graph, lib, ctx)
+# set inputs
+m.set_input('data', tvm.nd.array(x.astype(dtype)))
+m.set_input(**params)
+# execute
+m.run()
+# get outputs
+tvm_output = m.get_output(0)
 top1 = np.argmax(tvm_output.asnumpy()[0])
 print('TVM prediction top-1:', top1, synset[top1])
+
+######################################################################
+# Use MXNet symbol with pretrained weights
+# ----------------------------------------
+# MXNet often use `arg_params` and `aux_params` to store network parameters
+# separately, here we show how to use these weights with existing API
+def block2symbol(block):
+    data = mx.sym.Variable('data')
+    sym = block(data)
+    args = {}
+    auxs = {}
+    for k, v in block.collect_params().items():
+        args[k] = mx.nd.array(v.data().asnumpy())
+    return sym, args, auxs
+mx_sym, args, auxs = block2symbol(block)
+# usually we would save/load it as checkpoint
+mx.model.save_checkpoint('resnet18_v1', 0, mx_sym, args, auxs)
+# there are 'resnet18_v1-0000.params' and 'resnet18_v1-symbol.json' on disk
+
+######################################################################
+# for a normal mxnet model, we start from here
+mx_sym, args, auxs = mx.model.load_checkpoint('resnet18_v1', 0)
+# now we use the same API to get Relay computation graph
+relay_func, relay_params = relay.frontend.from_mxnet(mx_sym, shape_dict,
+                                                     arg_params=args, aux_params=auxs)
+# repeat the same steps to run this model using TVM

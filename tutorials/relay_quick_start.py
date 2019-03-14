@@ -1,12 +1,12 @@
 """
-.. _tutorial-nnvm-quick-start:
+.. _tutorial-relay-quick-start:
 
 Quick Start Tutorial for Compiling Deep Learning Models
-=======================================================
-**Author**: `Yao Wang <https://github.com/kevinthesun>`_
+======================================================
+**Author**: `Yao Wang <https://github.com/kevinthesun>`_, `Truman Tian <https://github.com/SiNZeRo>`_
 
-This example shows how to build a neural network with NNVM python frontend and
-generate runtime library for Nvidia GPU with TVM.
+This example shows how to build a neural network with Relay python frontend and
+generates a runtime library for Nvidia GPU with TVM.
 Notice that you need to build TVM with cuda and llvm enabled.
 """
 
@@ -20,27 +20,27 @@ Notice that you need to build TVM with cuda and llvm enabled.
 #      :scale: 100%
 #
 # In this tutorial, we'll choose cuda and llvm as target backends.
-# To begin with, let's import NNVM and TVM.
+# To begin with, let's import Relay and TVM.
 
 import numpy as np
 
-import nnvm.compiler
-import nnvm.testing
+from tvm import relay
+from tvm.relay import testing
 import tvm
 from tvm.contrib import graph_runtime
 
 ######################################################################
-# Define Neural Network in NNVM
+# Define Neural Network in Relay
 # -----------------------------
-# First, let's define a neural network with nnvm python frontend.
-# For simplicity, we'll use pre-defined resnet-18 network in NNVM.
+# First, let's define a neural network with relay python frontend.
+# For simplicity, we'll use pre-defined resnet-18 network in Relay.
 # Parameters are initialized with Xavier initializer.
-# NNVM also supports other model formats such as MXNet, CoreML, ONNX and 
+# Relay also supports other model formats such as MXNet, CoreML, ONNX and
 # Tensorflow.
 #
 # In this tutorial, we assume we will do inference on our device
 # and the batch size is set to be 1. Input images are RGB color
-# images of size 224 * 224. We can call the :any:`nnvm.symbol.debug_str`
+# images of size 224 * 224. We can call the :any:`tvm.relay.expr.astext()`
 # to show the network structure.
 
 batch_size = 1
@@ -49,38 +49,40 @@ image_shape = (3, 224, 224)
 data_shape = (batch_size,) + image_shape
 out_shape = (batch_size, num_class)
 
-net, params = nnvm.testing.resnet.get_workload(
+net, params = relay.testing.resnet.get_workload(
     num_layers=18, batch_size=batch_size, image_shape=image_shape)
-print(net.debug_str())
+
+# set show_meta_data=True if you want to show meta data
+print(net.astext(show_meta_data=False))
 
 ######################################################################
 # Compilation
 # -----------
-# Next step is to compile the model using the NNVM/TVM pipeline.
+# Next step is to compile the model using the Relay/TVM pipeline.
 # Users can specify the optimization level of the compilation.
 # Currently this value can be 0 to 3. The optimization passes include
 # operator fusion, pre-computation, layout transformation and so on.
 #
-# :any:`nnvm.compiler.build` returns three components: the execution graph in
+# :any:`relay.build_module.build` returns three components: the execution graph in
 # json format, the TVM module library of compiled functions specifically
 # for this graph on the target hardware, and the parameter blobs of
-# the model. During the compilation, NNVM does the graph-level
+# the model. During the compilation, Relay does the graph-level
 # optimization while TVM does the tensor-level optimization, resulting
 # in an optimized runtime module for model serving.
 #
-# We'll first compile for Nvidia GPU. Behind the scene, `nnvm.compiler.build`
+# We'll first compile for Nvidia GPU. Behind the scene, `relay.build_module.build`
 # first does a number of graph-level optimizations, e.g. pruning, fusing, etc.,
 # then registers the operators (i.e. the nodes of the optimized graphs) to
 # TVM implementations to generate a `tvm.module`.
-# To generate the module library, TVM will first transfer the High level IR
+# To generate the module library, TVM will first transfer the high level IR
 # into the lower intrinsic IR of the specified target backend, which is CUDA
 # in this example. Then the machine code will be generated as the module library.
 
 opt_level = 3
 target = tvm.target.cuda()
-with nnvm.compiler.build_config(opt_level=opt_level):
-    graph, lib, params = nnvm.compiler.build(
-        net, target, shape={"data": data_shape}, params=params)
+with relay.build_config(opt_level=opt_level):
+    graph, lib, params = relay.build_module.build(
+        net, target, params=params)
 
 #####################################################################
 # Run the generate library
@@ -98,12 +100,10 @@ module.set_input(**params)
 # run
 module.run()
 # get output
-out = module.get_output(0, tvm.nd.empty(out_shape))
-# convert to numpy
-out.asnumpy()
+out = module.get_output(0, tvm.nd.empty(out_shape)).asnumpy()
 
 # Print first 10 elements of output
-print(out.asnumpy().flatten()[0:10])
+print(out.flatten()[0:10])
 
 ######################################################################
 # Save and Load Compiled Module
@@ -120,9 +120,9 @@ temp = util.tempdir()
 path_lib = temp.relpath("deploy_lib.tar")
 lib.export_library(path_lib)
 with open(temp.relpath("deploy_graph.json"), "w") as fo:
-    fo.write(graph.json())
+    fo.write(graph)
 with open(temp.relpath("deploy_param.params"), "wb") as fo:
-    fo.write(nnvm.compiler.save_param_dict(params))
+    fo.write(relay.save_param_dict(params))
 print(temp.listdir())
 
 ####################################################
@@ -136,4 +136,10 @@ input_data = tvm.nd.array(np.random.uniform(size=data_shape).astype("float32"))
 module = graph_runtime.create(loaded_json, loaded_lib, ctx)
 module.load_params(loaded_params)
 module.run(data=input_data)
-out = module.get_output(0).asnumpy()
+out_deploy = module.get_output(0).asnumpy()
+
+# Print first 10 elements of output
+print(out_deploy.flatten()[0:10])
+
+# check whether the output from deployed module is consistent with original one
+tvm.testing.assert_allclose(out_deploy, out, atol=1e-3)

@@ -64,6 +64,13 @@ def _mx_activations(inputs, attrs):
     raise RuntimeError("Do not support act_type: {}".format(act_type))
 
 
+def _mx_compare(new_op, wrapper):
+    def impl(inputs, attrs):
+        dtype = ir_pass.infer_type(inputs[0]).checked_type.dtype
+        return wrapper(new_op)(inputs, attrs).astype(dtype)
+    return impl
+
+
 def _mx_conv2d(inputs, attrs):
     kernel_size = attrs.get_int_tuple("kernel")
     if len(kernel_size) != 2:
@@ -159,6 +166,10 @@ def _mx_dropout(inputs, attrs):
     return _op.nn.dropout(inputs[0], rate=rate)
 
 
+def _mx_BlockGrad(inputs, attrs): #pylint: disable=unused-argument
+    return inputs
+
+
 def _mx_batch_norm(inputs, attrs):
     if attrs.get_bool("output_mean_var", False):
         raise RuntimeError("batch_norm do not support output_mean_var")
@@ -185,6 +196,44 @@ def _mx_slice(inputs, attrs):
     if stride is not None:
         new_attrs['strides'] = stride
     return _op.strided_slice(inputs[0], **new_attrs)
+
+
+def _mx_slice_like(inputs, attrs):
+    assert len(inputs) == 2
+    new_attrs = {}
+    new_attrs["axes"] = attrs.get_int_tuple("axes", None)
+    return _op.slice_like(*inputs, **new_attrs)
+
+
+def _mx_slice_axis(inputs, attrs):
+    assert len(inputs) == 1
+    shape = ir_pass.infer_type(inputs[0]).checked_type.shape
+    axis = attrs.get_int("axis")
+    ax_beg = attrs.get_int("begin")
+    ax_end = attrs.get_str("end")
+    if axis < 0:
+        axis += len(shape)
+    assert axis >= 0 and axis < len(shape)
+    if ax_end == "None":
+        ax_end = int(shape[axis])
+    else:
+        ax_end = int(ax_end)
+    if ax_beg < 0:
+        ax_beg += int(shape[axis])
+    if ax_end < 0:
+        ax_end += int(shape[axis])
+    assert ax_beg >= 0 and ax_beg < int(shape[axis])
+    assert ax_end > ax_beg and ax_end <= int(shape[axis])
+    begin = []
+    end = []
+    for i, dim in enumerate(shape):
+        if i != axis:
+            begin.append(0)
+            end.append(dim)
+        else:
+            begin.append(ax_beg)
+            end.append(ax_end)
+    return _op.strided_slice(inputs[0], begin, end)
 
 
 def _mx_split(inputs, attrs):
@@ -215,6 +264,11 @@ def _mx_concat(inputs, attrs):
     return _op.concatenate(tuple(inputs), axis=axis)
 
 
+def _mx_stack(inputs, attrs):
+    axis = attrs.get_int("axis", 0)
+    return _op.stack(tuple(inputs), axis=axis)
+
+
 def _mx_expand_dims(inputs, attrs):
     axis = attrs.get_int("axis")
     return _op.expand_dims(inputs[0], axis=axis)
@@ -242,6 +296,51 @@ def _mx_leaky_relu(inputs, attrs):
         alpha = (lower_bound + upper_bound) / 2.0
         return _op.nn.leaky_relu(inputs[0], alpha=alpha)
     raise RuntimeError("act_type: {} is not supported".format(act_type))
+
+
+def _mx_make_power(power):
+    def _impl(inputs, _):  # Note: no attrs
+        assert len(inputs) == 1
+        scalar = _expr.const(power, dtype=None)
+        # Note: int maps to "int32", float maps to "float32"
+        return _op.power(inputs[0], scalar)
+    return _impl
+
+
+def _mx_make_exponent(base):
+    # exp(b, x) = e^b * e^x
+    def _impl(inputs, _):  # Note: no attrs
+        assert len(inputs) == 1
+        scalar = _op.exp(_expr.const(base, dtype="float32"))
+        return _op.multiply(inputs[0], scalar)
+    return _impl
+
+
+def _mx_make_logarithm(base):
+    # log(b, x) = log(x) / log(b)
+    def _impl(inputs, _):  # Note: no attrs
+        assert len(inputs) == 1
+        scalar = _op.log(_expr.const(base, dtype="float32"))
+        return _op.divide(inputs[0], scalar)
+    return _impl
+
+
+def _mx_expm1():
+    # exp_minus_1 x = exp(x) - 1
+    def _impl(inputs, _):  # Note: no attrs
+        assert len(inputs) == 1
+        one = _expr.const(1, dtype="float32")
+        return _op.log(_op.subtract(inputs[0], one))
+    return _impl
+
+
+def _mx_log1p():
+    # 1_plus_log x = log(x + 1)
+    def _impl(inputs, _):  # Note: no attrs
+        assert len(inputs) == 1
+        one = _expr.const(1, dtype="float32")
+        return _op.log(_op.add(inputs[0], one))
+    return _impl
 
 
 def _mx_lrn(inputs, attrs):
@@ -274,13 +373,26 @@ def _mx_multibox_detection(inputs, attrs):
                                                                   0.2, 0.2))
 
     new_attrs1 = {}
-    new_attrs1["overlap_threshold"] = attrs.get_float("nms_threshold", 0.5)
+    new_attrs1["return_indices"] = False
+    new_attrs1["iou_threshold"] = attrs.get_float("nms_threshold", 0.5)
     new_attrs1["force_suppress"] = attrs.get_bool("force_suppress", False)
-    new_attrs1["topk"] = attrs.get_int("nms_topk", -1)
+    new_attrs1["top_k"] = attrs.get_int("nms_topk", -1)
 
     ret = _op.vision.multibox_transform_loc(inputs[0], inputs[1],
                                             inputs[2], **new_attrs0)
-    return _op.vision.nms(ret[0], ret[1], **new_attrs1)
+    return _op.vision.non_max_suppression(ret[0], ret[1], **new_attrs1)
+
+
+def _mx_batch_dot(inputs, attrs):
+    assert len(inputs) == 2
+    a, b = inputs
+    transpose_a = attrs.get_bool("transpose_a", False)
+    transpose_b = attrs.get_bool("transpose_b", False)
+    if transpose_a is True:
+        raise RuntimeError("batch_dot: only support transpose_a=False")
+    if transpose_b is False:
+        b = _op.transpose(b, axes=[0, 2, 1])
+    return _op.batch_matmul(a, b)
 
 
 def _mx_arange(inputs, attrs):
@@ -295,6 +407,28 @@ def _mx_arange(inputs, attrs):
     return _op.arange(**new_attrs)
 
 
+def _mx_repeat(inputs, attrs):
+    assert len(inputs) == 1
+    new_attrs = {}
+    new_attrs["repeats"] = attrs.get_int("repeats")
+    new_attrs["axis"] = attrs.get_int("axis", 0)
+    return _op.repeat(inputs[0], **new_attrs)
+
+
+def _mx_tile(inputs, attrs):
+    assert len(inputs) == 1
+    new_attrs = {}
+    new_attrs["reps"] = attrs.get_int_tuple("reps")
+    return _op.tile(inputs[0], **new_attrs)
+
+
+def _mx_reverse(inputs, attrs):
+    assert len(inputs) == 1
+    new_attrs = {}
+    new_attrs["axis"] = attrs.get_int("axis")
+    return _op.reverse(inputs[0], **new_attrs)
+
+
 def _mx_roi_align(inputs, attrs):
     new_attrs = {}
     new_attrs["pooled_size"] = attrs.get_int_tuple("pooled_size")
@@ -304,6 +438,76 @@ def _mx_roi_align(inputs, attrs):
     return _op.vision.roi_align(inputs[0], inputs[1], **new_attrs)
 
 
+def _mx_proposal(inputs, attrs):
+    new_attrs = {}
+    new_attrs["scales"] = attrs.get_float_tuple("scales", (4.0, 8.0, 16.0, 32.0))
+    new_attrs["ratios"] = attrs.get_float_tuple("ratios", (0.5, 1.0, 2.0))
+    new_attrs["feature_stride"] = attrs.get_int("feature_stride", 16)
+    new_attrs["threshold"] = attrs.get_float("threshold", 0.7)
+    new_attrs["rpn_pre_nms_top_n"] = attrs.get_int("rpn_pre_nms_top_n", 6000)
+    new_attrs["rpn_post_nms_top_n"] = attrs.get_int("rpn_post_nms_top_n", 300)
+    new_attrs["rpn_min_size"] = attrs.get_int("rpn_min_size", 16)
+    new_attrs["iou_loss"] = attrs.get_bool("iou_loss", False)
+    assert not attrs.get_bool("output_score", False), "proposal doesn't support output score"
+    return _op.vision.proposal(inputs[0], inputs[1], inputs[2], **new_attrs)
+
+
+def _mx_box_nms(inputs, attrs):
+    force_suppress = attrs.get_bool("force_suppress", False)
+    iou_thresh = attrs.get_float('overlap_thresh', 0.5)
+    top_k = attrs.get_int('topk', -1)
+    valid_thresh = attrs.get_float('valid_thresh', 0)
+    coord_start = attrs.get_int('coord_start', 2)
+    score_index = attrs.get_int('score_index', 1)
+    id_index = attrs.get_int('id_index', -1)
+    in_format = attrs.get_str('in_format', 'corner')
+    out_format = attrs.get_str('out_format', 'corner')
+    if coord_start != 2:
+        raise RuntimeError('coord_start %s is not supported.' % coord_start)
+    if score_index != 1:
+        raise RuntimeError('score_index %s is not supported.' % score_index)
+    if id_index != -1 and int(id_index) != 0:
+        raise RuntimeError('id_index %s is not supported.' % id_index)
+    if in_format != 'corner':
+        raise RuntimeError('in_format %s is not supported.' % in_format)
+    if out_format != 'corner':
+        raise RuntimeError('out_format %s is not supported.' % out_format)
+
+    ret = _op.vision.get_valid_counts(inputs[0], score_threshold=valid_thresh)
+    nms_out = _op.vision.non_max_suppression(ret[1],
+                                             ret[0],
+                                             iou_threshold=iou_thresh,
+                                             force_suppress=force_suppress,
+                                             top_k=top_k,
+                                             id_index=id_index,
+                                             return_indices=False,
+                                             invalid_to_bottom=True)
+    return nms_out
+
+
+def _mx_l2_normalize(inputs, attrs):
+    new_attrs = {}
+    mode = attrs.get_str('mode', 'instance')
+    if mode != 'channel':
+        raise RuntimeError('mode %s is not supported.' % mode)
+    new_attrs['eps'] = attrs.get_float('eps', 1e-10)
+    new_attrs['axis'] = [1]
+    return _op.nn.l2_normalize(inputs[0], **new_attrs)
+
+
+def _mx_shape_array(inputs, attrs):
+    assert len(inputs) == 1
+    if attrs.get_int("lhs_begin", None) is not None:
+        raise RuntimeError("shape_array doesn't support lhs_begin")
+    if attrs.get_int("lhs_end", None) is not None:
+        raise RuntimeError("shape_array doesn't support lhs_end")
+    if attrs.get_int("rhs_begin", None) is not None:
+        raise RuntimeError("shape_array doesn't support rhs_begin")
+    if attrs.get_int("rhs_end", None) is not None:
+        raise RuntimeError("shape_array doesn't support rhs_end")
+    return _op.shape_of(inputs[0], dtype='int64')
+
+
 # Note: due to attribute conversion constraint
 # ops in the identity set must be attribute free
 _identity_list = [
@@ -311,43 +515,73 @@ _identity_list = [
     "exp",
     "sigmoid",
     "tanh",
-    "exp",
     "negative",
     "reshape_like",
-    "slice_like",
     "zeros_like",
     "ones_like",
     "where",
 ]
 
 _convert_map = {
-    "_copy"         : _rename(_op.copy),
-    "relu"          : _rename(_op.nn.relu),
-    "broadcast_add" : _rename(_op.add),
-    "broadcast_sub" : _rename(_op.subtract),
-    "broadcast_mul" : _rename(_op.multiply),
-    "broadcast_div" : _rename(_op.divide),
-    "elemwise_add"  : _rename(_op.add),
-    "elemwise_sub"  : _rename(_op.subtract),
-    "elemwise_mul"  : _rename(_op.multiply),
-    "elemwise_div"  : _rename(_op.divide),
-    "flatten"       : _rename(_op.nn.batch_flatten),
-    "Flatten"       : _rename(_op.nn.batch_flatten),
-    "_plus_scalar"  : _binop_scalar(_op.add),
-    "__add_scalar__": _binop_scalar(_op.add),
-    "__sub_scalar__": _binop_scalar(_op.subtract),
-    "_minus_scalar" : _binop_scalar(_op.subtract),
-    "__mul_scalar__": _binop_scalar(_op.multiply),
-    "_mul_scalar"   : _binop_scalar(_op.multiply),
-    "__div_scalar__": _binop_scalar(_op.divide),
-    "_div_scalar"   : _binop_scalar(_op.divide),
-    "__pow_scalar__": _binop_scalar(_op.power),
-    "_rminus_scalar": _rbinop_scalar(_op.subtract),
-    "__rsub_scalar__": _rbinop_scalar(_op.subtract),
-    "_rdiv_scalar"  : _rbinop_scalar(_op.divide),
-    "__rdiv_scalar__"  : _rbinop_scalar(_op.divide),
-    "__rpow_scalar__": _rbinop_scalar(_op.power),
+    "_copy"                  : _rename(_op.copy),
+    "relu"                   : _rename(_op.nn.relu),
+    "broadcast_add"          : _rename(_op.add),
+    "broadcast_sub"          : _rename(_op.subtract),
+    "broadcast_mul"          : _rename(_op.multiply),
+    "broadcast_div"          : _rename(_op.divide),
+    "broadcast_mod"          : _rename(_op.mod),
+    "broadcast_maximum"      : _rename(_op.maximum),
+    "broadcast_minimum"      : _rename(_op.minimum),
+    "broadcast_equal"        : _mx_compare(_op.equal, _rename),
+    "broadcast_not_equal"    : _mx_compare(_op.not_equal, _rename),
+    "broadcast_greater"      : _mx_compare(_op.greater, _rename),
+    "broadcast_greater_equal": _mx_compare(_op.greater_equal, _rename),
+    "broadcast_lesser"       : _mx_compare(_op.less, _rename),
+    "broadcast_lesser_equal" : _mx_compare(_op.less_equal, _rename),
+    "elemwise_add"           : _rename(_op.add),
+    "elemwise_sub"           : _rename(_op.subtract),
+    "elemwise_mul"           : _rename(_op.multiply),
+    "elemwise_div"           : _rename(_op.divide),
+    "_maximum"               : _rename(_op.maximum),
+    "_minimum"               : _rename(_op.minimum),
+    "flatten"                : _rename(_op.nn.batch_flatten),
+    "Flatten"                : _rename(_op.nn.batch_flatten),
+    # scalar power
+    "square"                 : _mx_make_power(2),
+    "sqrt"                   : _mx_make_power(1/2),
+    "rsqrt"                  : _mx_make_power(-1/2),
+    "cbrt"                   : _mx_make_power(1/3),
+    "rcbrt"                  : _mx_make_power(-1/3),
+    "__pow_scalar__"         : _binop_scalar(_op.power),
+    "_power_scalar"          : _binop_scalar(_op.power),
+    "__rsub_scalar__"        : _rbinop_scalar(_op.subtract),
+    "_rminus_scalar"         : _rbinop_scalar(_op.subtract),
+    "__rdiv_scalar__"        : _rbinop_scalar(_op.divide),
+    "_rdiv_scalar"           : _rbinop_scalar(_op.divide),
+    "__rpow_scalar__"        : _rbinop_scalar(_op.power),
+    # scalar op
+    "__add_scalar__"         : _binop_scalar(_op.add),
+    "_plus_scalar"           : _binop_scalar(_op.add),
+    "__sub_scalar__"         : _binop_scalar(_op.subtract),
+    "_minus_scalar"          : _binop_scalar(_op.subtract),
+    "__mul_scalar__"         : _binop_scalar(_op.multiply),
+    "_mul_scalar"            : _binop_scalar(_op.multiply),
+    "__div_scalar__"         : _binop_scalar(_op.divide),
+    "_div_scalar"            : _binop_scalar(_op.divide),
+    "log2"                   : _mx_make_logarithm(2),
+    "log10"                  : _mx_make_logarithm(10),
+    "log1p"                  : _mx_log1p,
+    "expm1"                  : _mx_expm1,
+    "_equal_scalar"          : _mx_compare(_op.equal, _binop_scalar),
+    "_not_equal_scalar"      : _mx_compare(_op.not_equal, _binop_scalar),
+    "_greater_scalar"        : _mx_compare(_op.greater, _binop_scalar),
+    "_greater_equal_scalar"  : _mx_compare(_op.greater_equal, _binop_scalar),
+    "_lesser_scalar"         : _mx_compare(_op.less, _binop_scalar),
+    "_lesser_equal_scalar"   : _mx_compare(_op.less_equal, _binop_scalar),
+    "_maximum_scalar"        : _binop_scalar(_op.maximum),
+    "_minimum_scalar"        : _binop_scalar(_op.minimum),
     # reduction ops
+    "mean"          : _reduce(_op.mean),
     "max"           : _reduce(_op.max),
     "min"           : _reduce(_op.min),
     "sum"           : _reduce(_op.sum),
@@ -383,27 +617,39 @@ _convert_map = {
     "BatchNorm"     : _mx_batch_norm,
     "BatchNorm_v1"  : _mx_batch_norm,
     "LRN"           : _mx_lrn,
+    "L2Normalization"  : _mx_l2_normalize,
     "slice"         : _mx_slice,
+    "slice_like"    : _mx_slice_like,
+    "slice_axis"    : _mx_slice_axis,
     "SliceChannel"  : _mx_split,
     "split"         : _mx_split,
     "expand_dims"   : _mx_expand_dims,
     "Concat"        : _mx_concat,
     "concat"        : _mx_concat,
+    "stack"         : _mx_stack,
+    "batch_dot"     : _mx_batch_dot,
     "LeakyReLU"     : _mx_leaky_relu,
     "_arange"       : _mx_arange,
+    "repeat"        : _mx_repeat,
+    "tile"          : _mx_tile,
+    "reverse"       : _mx_reverse,
+    "BlockGrad"     : _mx_BlockGrad,
+    "shape_array"   : _mx_shape_array,
     "SoftmaxOutput" : _mx_softmax_output,
     "SoftmaxActivation" : _mx_softmax_activation,
     # vision
     "_contrib_MultiBoxPrior" : _mx_multibox_prior,
     "_contrib_MultiBoxDetection" : _mx_multibox_detection,
     "_contrib_ROIAlign" : _mx_roi_align,
+    "_contrib_Proposal" : _mx_proposal,
+    "_contrib_MultiProposal" : _mx_proposal,
+    "_contrib_box_nms" : _mx_box_nms,
     # List of missing operators that are present in NNVMv1
     # TODO(tvm-tvm): support all operators.
     #
     # "broadcast_to",
     # "gather_nd",
     # "Crop"          : _crop_like,
-
 }
 
 # set identity list
@@ -540,6 +786,8 @@ def from_mxnet(symbol,
             params[k] = _nd.array(v.data().asnumpy())
         data = mx.sym.Variable("data")
         sym = symbol(data)
+        if isinstance(sym, (list, tuple)):
+            sym = mx.sym.Group(sym)
         shape, dtype = _update_shape_dtype(shape, dtype, params)
         sym = _from_mxnet_impl(sym, shape, dtype)
     elif isinstance(symbol, mx.gluon.Block):
